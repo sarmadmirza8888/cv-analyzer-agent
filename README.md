@@ -61,7 +61,6 @@ The notebook was developed and run on **Kaggle with a GPU runtime**. The 4-bit m
 ```
 2. **Model.** Provide a 4-bit quantized Mistral 7B Instruct checkpoint. On Kaggle, attach it as a dataset. The notebook looks under `/kaggle/input` for a model folder with "mistral" in its path. Elsewhere, point `MODEL_PATH` at your local folder.
 3. **Data.** The CV dataset is not included, because it contains personal information. Each file is a JSON with a `"text"` field holding the CV text. The notebook loads every JSON under `/kaggle/input`.
-   Dataset source: **[add the source and link here]**
 4. **MLflow / Databricks (optional).** Add `DATABRICKS_HOST` and `DATABRICKS_TOKEN` as Kaggle secrets, and change the experiment path in the second cell to your own. To run without tracing, skip that cell and remove the `@mlflow.trace` and `mlflow.update_current_trace` lines.
 5. **Run** the notebook top to bottom.
 
@@ -81,7 +80,8 @@ Commands: `memory` (show the summary and window), `cache` (cache statistics), `s
 
 ## Tracing
 
-[Add a screenshot of an MLflow trace here. Use a calculator question, not a CV question, so no personal data is shown.]
+<img width="766" height="386" alt="image" src="https://github.com/user-attachments/assets/5341b144-42db-4037-9f85-b97810d17388" />
+
 
 ## Known limitations
 
