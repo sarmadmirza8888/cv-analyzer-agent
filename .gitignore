@@ -1,0 +1,6 @@
+history.json
+history.json.tmp
+history.json.corrupt-*
+*.env
+data/
+.ipynb_checkpoints/
