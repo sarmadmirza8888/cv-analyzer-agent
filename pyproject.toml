@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cv-search-agent"
+version = "0.1.0"
+description = "Coordinator + specialist ReAct agents over a local Mistral-7B model, with RAG, semantic caching and MLflow tracing."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Sarmad Mirza" }]
+dependencies = [
+    "mlflow[databricks]>=3.1",
+    "transformers==4.57.3",
+    "mistral-common",
+    "accelerate",
+    "bitsandbytes",
+    "torch",
+    "langchain",
+    "langchain-core",
+    "langchain-classic",
+    "langchain-community",
+    "langchain-huggingface",
+    "langchain-text-splitters",
+    "sentence-transformers",
+    "faiss-cpu",
+    "ddgs",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+cv-agent = "cv_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
