@@ -1,98 +1,163 @@
-# CV Analyzer Agent
+# CV Search Multi-Agent System
 
-A multi-agent system that runs entirely on a locally hosted, 4-bit quantized **Mistral 7B Instruct**. A coordinator agent delegates each request to a specialist sub-agent for **CV search (FAISS)**, **calculations**, or **web search**. It also has conversation memory, a persistent question cache, and **MLflow tracing on Databricks**.
+A coordinator agent routes questions to three specialist agents (CV search over 495 CVs, a calculator, web search). Everything runs on a local 4-bit Mistral-7B-Instruct model, with end-to-end MLflow tracing on Databricks.
 
-> This project builds on [`cv-search-rag-agent`](../cv-search-rag-agent), which covers the retrieval pipeline and native tool calling. This repo covers the multi-agent layer on top.
+**Status:** working prototype, developed and run on Kaggle. There is no quantitative evaluation yet (see [Evaluation](#evaluation)).
 
-## Features
+## What this demonstrates
 
-- **Coordinator + specialists.** A ReAct coordinator routes each request to one of three ReAct sub-agents: CV search, calculator, or web search.
-- **RAG over CVs.** About 500 CVs are split into 1000-character chunks (200 overlap), embedded with `all-MiniLM-L6-v2`, and indexed in FAISS. The CV agent retrieves the top 3 chunks and answers only from them.
-- **Hardened for a small local LLM.**
-  - A custom `GroundedReActOutputParser` keeps the real tool call when the model also guesses a "Final Answer" in the same turn.
-  - A response cleaner and generation `stop_strings` stop the model from inventing new questions or tool calls.
-  - `max_iterations` and `max_new_tokens` are capped.
-- **Summary-buffer memory.** The last 4 turns are kept word for word. Older turns are compressed into a short LLM-written summary. Long answers are clipped in the window.
-- **Persistent question cache.** Each question is checked first by exact match on its normalized text, then by cosine similarity between sentence embeddings (default threshold 0.90). Time-sensitive questions ("latest", "price", ...) are never cached.
-- **Safe persistence.** Memory and cache are saved to `history.json` with atomic writes (temp file + `os.replace`), corrupt-file recovery, schema versioning, and automatic re-embedding if the embedding model changes.
-- **MLflow tracing (optional).** LangChain autologging plus `@mlflow.trace` capture every agent, tool and LLM call in Databricks. Traces are tagged with whether the answer came from the agent or the cache.
+- **Multi-agent orchestration.** A coordinator ReAct agent delegates to specialist agents that are exposed to it as tools.
+- **RAG.** 495 CV documents split into 2,575 chunks, embedded with all-MiniLM-L6-v2, indexed in FAISS, retrieved with source files.
+- **Making a small model usable.** Stop strings, a custom output parser and output cleaning address specific failures of a 7B model in ReAct loops.
+- **Memory and caching.** Summary-buffer conversation memory and a two-layer semantic answer cache, both persisted to JSON.
+- **Observability.** MLflow traces of agent, tool, retriever and LLM calls on Databricks, tagged by whether the answer came from the cache or the agent.
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    Q["User query"] --> CACHE{"Semantic cache<br/>exact, then cosine at 0.90"}
+    CACHE -->|hit| ANS["Answer"]
+    CACHE -->|miss| CTX["Memory context<br/>summary + last 4 turns"]
+    CTX --> COORD["Coordinator agent<br/>ReAct, max 2 iterations"]
+    COORD --> CV["CV search agent"]
+    COORD --> CALC["Calculator agent"]
+    COORD --> WEB["Web search agent"]
+    CV --> FAISS[("FAISS index")]
+    CALC --> ARITH["Arithmetic tools"]
+    WEB --> DDG["DuckDuckGo search"]
+    FAISS --> CLEAN["Output cleaning"]
+    ARITH --> CLEAN
+    DDG --> CLEAN
+    CLEAN --> ANS
+    ANS --> MEM["Memory update + cache add"]
+    MEM --> PERSIST[("history.json")]
 ```
-                    User question
-                          |
-                 +--------v--------+
-                 |  History cache  |-- hit --> cached answer
-                 +--------+--------+
-                          | miss
-                 +--------v--------+
-                 | Memory context  |  summary + last 4 turns
-                 +--------+--------+
-                          |
-                 +--------v--------+
-                 |   Coordinator   |  ReAct, Mistral 7B (4-bit)
-                 +---+----+----+---+
-                     |    |    |
-          +----------+    |    +-----------+
-          v               v                v
-   CV search agent   Calculator agent   Web search agent
-   (FAISS, k=3)      (+ - x / tools)    (DuckDuckGo)
-```
 
-## Tech stack
+MLflow tracing wraps the whole path, and one local Mistral model drives every agent and the summariser. A text version and the module map are in [docs/architecture.md](docs/architecture.md).
 
-Python, PyTorch, Hugging Face Transformers, bitsandbytes (4-bit), LangChain, FAISS, sentence-transformers, DuckDuckGo search, MLflow on Databricks.
+## Where each skill lives
 
-## Repository contents
-
-| File | Description |
+| Skill | Module |
 |---|---|
-| `search-cv-agent-databricks.ipynb` | The full agent: model loading, RAG, sub-agents, memory, cache, persistence, tracing |
-| `requirements.txt` | Python dependencies |
+| Agent orchestration, tool calling | [`agents.py`](src/cv_agent/agents.py), [`tools.py`](src/cv_agent/tools.py) |
+| RAG | [`rag.py`](src/cv_agent/rag.py) |
+| Reliability engineering for a small local model | [`llm.py`](src/cv_agent/llm.py), [`grounded_parser.py`](src/cv_agent/grounded_parser.py), [`output_cleaning.py`](src/cv_agent/output_cleaning.py) |
+| Conversation memory | [`memory.py`](src/cv_agent/memory.py), [`summarizer.py`](src/cv_agent/summarizer.py) |
+| Semantic caching | [`cache.py`](src/cv_agent/cache.py) |
+| Persistence | [`persistence.py`](src/cv_agent/persistence.py) |
+| LLM observability | [`tracing.py`](src/cv_agent/tracing.py), [`assistant.py`](src/cv_agent/assistant.py) |
 
-## Setup
-
-The notebook was developed and run on **Kaggle with a GPU runtime**. The 4-bit model needs a CUDA GPU.
-
-1. **Install dependencies**
-```bash
-   pip install -r requirements.txt
-```
-2. **Model.** Provide a 4-bit quantized Mistral 7B Instruct checkpoint. On Kaggle, attach it as a dataset. The notebook looks under `/kaggle/input` for a model folder with "mistral" in its path. Elsewhere, point `MODEL_PATH` at your local folder.
-3. **Data.** The CV dataset is not included, because it contains personal information. Each file is a JSON with a `"text"` field holding the CV text. The notebook loads every JSON under `/kaggle/input`.
-4. **MLflow / Databricks (optional).** Add `DATABRICKS_HOST` and `DATABRICKS_TOKEN` as Kaggle secrets, and change the experiment path in the second cell to your own. To run without tracing, skip that cell and remove the `@mlflow.trace` and `mlflow.update_current_trace` lines.
-5. **Run** the notebook top to bottom.
-
-Outside Kaggle, replace `kaggle_secrets` with environment variables and change the `/kaggle/...` paths.
-
-## Usage
-
-The last cell starts an interactive chat:
+## Repository layout
 
 ```
-You: Who has experience with Python and Docker?
-You: What is 25 multiplied by 4?
-You: What is the latest version of Python?
+cv-search-agent/
+├── src/cv_agent/          the package (one responsibility per module)
+├── tests/                 unit tests for the logic that does not need a GPU
+├── scripts/
+│   ├── run_demo.py        fixed list of queries with timing
+│   └── sanity_checks.py   raw generation, stop strings, retrieval
+├── notebooks/
+│   └── cv_agent_walkthrough.ipynb   the original single-file notebook, with captured outputs
+├── docs/
+│   ├── architecture.md
+│   └── design_decisions.md
+├── pyproject.toml
+└── requirements.txt
 ```
 
-Commands: `memory` (show the summary and window), `cache` (cache statistics), `save`, `reset`, `exit`.
+## Quick start
 
-## Tracing
+Developed on Kaggle with a GPU. I have not run it anywhere else.
 
-<img width="766" height="386" alt="image" src="https://github.com/user-attachments/assets/5341b144-42db-4037-9f85-b97810d17388" />
+1. Create a Kaggle notebook with a GPU accelerator and Internet on.
+2. Attach a Mistral-7B-Instruct 4-bit model dataset and the CV JSON dataset (each file has a `"text"` field).
+3. Add Kaggle secrets `DATABRICKS_HOST` and `DATABRICKS_TOKEN`.
+4. In a notebook cell:
 
+```python
+!git clone https://github.com/<your-github-username>/cv-search-agent
+!pip install -q -e cv-search-agent
+
+import os
+os.environ["MLFLOW_EXPERIMENT"] = "/Users/<your-email>/my-ai-agent"
+
+from cv_agent.bootstrap import build_assistant
+
+assistant = build_assistant()
+print(assistant.ask("Who has experience with Python and Docker?"))
+```
+
+Other entry points: `python -m cv_agent` (interactive chat) and `python scripts/run_demo.py` (scripted queries). If no Databricks credentials are found, tracing is skipped.
+
+### Configuration
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `CV_AGENT_MODEL_PATH` | Folder with the Mistral weights | First folder under `/kaggle/input` with "mistral" in its path |
+| `CV_AGENT_DATA_DIR` | Folder with the CV `.json` files | `/kaggle/input` |
+| `CV_AGENT_HISTORY_PATH` | Where `history.json` is written | `/kaggle/working/history.json` on Kaggle, else `./history.json` |
+| `MLFLOW_EXPERIMENT` | Databricks experiment path | none, required when tracing |
+| `DATABRICKS_HOST`, `DATABRICKS_TOKEN` | Databricks credentials | read from the environment, then from Kaggle secrets |
+
+Tunable constants (chunk size, top-k, iteration caps, cache threshold) are in [`config.py`](src/cv_agent/config.py).
+
+## Reliability engineering for a 7B model
+
+The model is small, so the ReAct loop breaks in specific ways. Each one was diagnosed and has a targeted fix:
+
+- It opens a fake `Question:` or `Thought:` turn after answering -> `stop_strings`, a 200-token cap and output cleaning.
+- It guesses a `Final Answer` in the same turn as an `Action`, and the stock parser's error then derails the next step -> `GroundedReActOutputParser` keeps the Action.
+- A long CV dump can fill the context -> clipped answers and batched summarisation.
+- A cache would return stale answers for "latest" questions -> time-sensitive words bypass it.
+
+The full problem/fix table is in [docs/design_decisions.md](docs/design_decisions.md).
+
+## Results so far
+
+Outputs captured from the Kaggle run (full outputs are in the [walkthrough notebook](notebooks/cv_agent_walkthrough.ipynb)):
+
+| Query | Routed to | Returned |
+|---|---|---|
+| What is 25 multiplied by 4? | Calculator agent | `100` |
+| What is the latest version of Python? | Web agent | The latest version of Python is 3.15.0. |
+
+Cache threshold probe at 0.90 (cosine similarity of query pairs):
+
+| Pair | Score | Fires |
+|---|---|---|
+| "What is 25 multiplied by 4?" / "what is 25 * 4" (same meaning) | 0.827 | No |
+| "Who has experience with Python and Docker?" / "Which candidates know Python and Docker?" (same meaning) | 0.773 | No |
+| "Who has experience with Python?" / "Who has experience with Java?" (different) | 0.528 | No |
+| "Who has a Master's degree?" / "How many candidates are there?" (different) | 0.154 | No |
+
+### Evaluation
+
+[TODO: add measured result - retrieval hit rate, answer correctness and latency on a labelled question set]
+
+[TODO: add MLflow trace screenshot - a cache-miss trace expanded to show coordinator, specialist and retriever/LLM spans]
 
 ## Known limitations
 
-- The model is small, so it can still misroute or fail to follow the ReAct format. The parser, cleaner, stop strings and iteration caps reduce this but do not remove it.
-- At the default 0.90 threshold, the cache only fires on near-identical questions. In my probes, genuine paraphrases scored about 0.6 to 0.8 and missed. Lowering the threshold catches more but risks returning an answer to a different question, so tune it with `qa_cache.rank(...)`.
-- Retrieval is plain top-3 similarity search. Questions about many candidates at once ("how many candidates know X?") are not handled well.
-- There is no quantitative evaluation of routing or answer quality yet.
+- No evaluation set, so retrieval quality, answer accuracy and latency are not measured.
+- The 7B model limits ReAct reliability. The fixes reduce failures but do not remove them: in one captured run the query for Java skills returned unfilled `[Candidate 1, ...]` placeholders instead of names.
+- Retrieval returns the top 3 chunks, so aggregate questions ("who has X and Y", counts) cannot be answered reliably.
+- The calculator agent demonstrates orchestration and tool calling. It is not a production design.
+- The 0.90 cache threshold is untuned; the probe above shows two paraphrase pairs below it.
+- No query that needs two specialists is demonstrated.
+- Web answers come from search snippets and do not cite sources.
 
-## Privacy
+## Tests
 
-The CV data comes from real people. Do not commit the dataset or `history.json`, and clear notebook outputs that print retrieved CV text before sharing.
+```
+pip install pytest numpy
+pytest
+```
 
-## Author
-Muhammad Sarmad Mirza: [GitHub](https://github.com/sarmadmirza8888) | [LinkedIn](https://linkedin.com/in/muhammad-sarmad-mirza-1a1a66381)
+The tests cover the logic that does not need a GPU: output cleaning, the cache (exact, semantic, TTL, time-sensitive bypass, export/import), memory, persistence (round trip, corrupt file, model change), and the assistant's cache-versus-agent flow with a fake coordinator. Tests that need LangChain or MLflow (`test_grounded_parser.py`, `test_tools.py`, `test_assistant.py`) skip themselves when those packages are missing. The model itself, retrieval quality and agent behaviour are not covered by automated tests.
+
+## Roadmap
+
+- Labelled evaluation set (20 to 30 questions) for retrieval and answer correctness.
+- Tune the cache threshold on labelled paraphrase pairs.
+- A query that exercises two specialists in one request.
